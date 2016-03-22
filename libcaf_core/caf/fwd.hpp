@@ -135,6 +135,14 @@ class manager;
 
 } // namespace opencl
 
+// -- Replication classes ------------------------------------------------------
+
+namespace replication {
+
+class replicator;
+
+} // namespace replication
+
 // -- scheduler classes --------------------------------------------------------
 
 namespace scheduler {
