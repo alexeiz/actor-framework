@@ -194,6 +194,9 @@ local_actor::local_actor(actor_config& cfg)
       error_handler_(default_error_handler),
       down_handler_(default_down_handler),
       exit_handler_(default_exit_handler),
+      open_credit_(50),
+      low_watermark_(10),
+      max_credit_(50),
       private_thread_(nullptr) {
   if (cfg.groups != nullptr)
     for (auto& grp : *cfg.groups)
@@ -327,6 +330,7 @@ local_actor::msg_type local_actor::filter_msg(mailbox_element& x) {
   if (mid.is_response())
     return msg_type::response;
   switch (msg.type_token()) {
+    // run-time access to various meta information
     case make_type_token<atom_value, atom_value, std::string>():
       if (msg.get_as<atom_value>(0) == sys_atom::value
           && msg.get_as<atom_value>(1) == get_atom::value) {
@@ -344,6 +348,82 @@ local_actor::msg_type local_actor::filter_msg(mailbox_element& x) {
                                   {}, sec::unsupported_sys_key),
             context());
         }
+        return msg_type::sys_message;
+      }
+      return msg_type::ordinary;
+    // register a new source at a sink
+    case make_type_token<atom_value, atom_value>():
+      if (msg.get_as<atom_value>(0) == sys_atom::value
+          && msg.get_as<atom_value>(1) == add_source_atom::value) {
+        if (! x.sender) {
+          CAF_LOG_ERROR("received ('sys', 'addSource', X) from anonymous");
+          return msg_type::sys_message;
+        }
+        if (! x.stages.empty()) {
+          CAF_LOG_ERROR("received multi-staged ('sys', 'addSource', X)");
+          return msg_type::sys_message;
+        }
+        if (! sources_.emplace(actor_cast<actor_addr>(x.sender), open_credit_).second) {
+          CAF_LOG_ERROR("multiple 'addSource'" << CAF_ARG(x.sender));
+          return msg_type::sys_message;
+        }
+        if (open_credit_ > 0) {
+          // give new source remaining credit
+          x.sender->enqueue(mailbox_element::make(ctrl(), message_id::make(),
+                                                  {}, sys_atom::value,
+                                                  get_atom::value,
+                                                  open_credit_),
+                             context());
+          open_credit_ = 0;
+        }
+        auto source_addr = actor_cast<actor_addr>(x.sender);
+        weak_actor_ptr weak_this{ctrl()};
+        x.sender->get()->attach_functor([=](const error&, execution_unit* ctx) {
+          auto strong_this = actor_cast<strong_actor_ptr>(weak_this);
+          if (! strong_this)
+            return;
+          strong_this->enqueue(mailbox_element::make(nullptr,
+                                                     message_id::make(), {},
+                                                     sys_atom::value,
+                                                     del_source_atom::value,
+                                                     source_addr),
+                               ctx);
+        });
+        return msg_type::sys_message;
+      }
+      return msg_type::ordinary;
+    case make_type_token<atom_value, atom_value, actor_addr>():
+      if (msg.get_as<atom_value>(0) == sys_atom::value
+          && msg.get_as<atom_value>(1) == del_source_atom::value) {
+        // drop anonymous 'delSource' messages
+        auto src = msg.get_as<actor_addr>(2);
+        auto i = sources_.find(src);
+        if (i == sources_.end())
+          return msg_type::sys_message;
+        auto released_credit = i->second;
+        sources_.erase(i);
+        grant_credit(released_credit, sources_.end());
+        return msg_type::sys_message;
+      }
+      return msg_type::ordinary;
+    case make_type_token<atom_value, atom_value, uint64_t>():
+      if (msg.get_as<atom_value>(0) == sys_atom::value
+          && msg.get_as<atom_value>(1) == get_atom::value) {
+        auto num = msg.get_as<uint64_t>(2);
+        if (! x.sender) {
+          CAF_LOG_ERROR("received ('sys', 'get', X) from anonymous");
+          return msg_type::sys_message;
+        }
+        auto dest = actor_cast<actor>(x.sender);
+        auto i = generators_.find(dest);
+        if (i == generators_.end()) {
+          CAF_LOG_INFO("dropped ('sys', 'get', X) from unknown sink");
+          return msg_type::sys_message;
+        }
+        auto& f = i->second.first;
+        for (uint64_t n = 0; n < num; ++n)
+          if (! f())
+            return msg_type::sys_message;
         return msg_type::sys_message;
       }
       return msg_type::ordinary;
@@ -450,6 +530,43 @@ private:
   local_actor* self_;
 };
 
+class local_actor_flow_visitor : public detail::invoke_result_visitor {
+public:
+  using iterator = local_actor::sources_map::iterator;
+  local_actor_flow_visitor(local_actor* ptr, iterator src)
+      : self_(ptr),
+        src_(src) {
+    // nop
+  }
+
+  void operator()() override {
+    // nop
+  }
+
+  void operator()(error& x) override {
+    CAF_LOG_WARNING("flow-controlled message handler returned an error: "
+                    << CAF_ARG(self_->system().render(x)));
+    CAF_IGNORE_UNUSED(x);
+  }
+
+  void operator()(message& x) override {
+    if (x.empty()) {
+      self_->grant_credit(1, src_);
+    } else {
+      CAF_LOG_WARNING("flow-controlled message handler returned a message: "
+                      << CAF_ARG(x));
+    }
+  }
+
+  void operator()(const none_t&) override {
+    CAF_LOG_WARNING("flow-controlled message handler returned none_t");
+  }
+
+private:
+  local_actor* self_;
+  iterator src_;
+};
+
 } // namespace <anonymous>
 
 void local_actor::handle_response(mailbox_element_ptr& ptr,
@@ -535,7 +652,6 @@ invoke_message_result local_actor::invoke_message(mailbox_element_ptr& ptr,
       return im_dropped;
     }
     case msg_type::ordinary: {
-      local_actor_invoke_result_visitor visitor{this};
       if (awaited_id.valid()) {
         CAF_LOG_DEBUG("skipped asynchronous message:" << CAF_ARG(awaited_id));
         return im_skipped;
@@ -545,21 +661,52 @@ invoke_message_result local_actor::invoke_message(mailbox_element_ptr& ptr,
       if (had_timeout)
         has_timeout(false);
       ptr.swap(current_element_);
-      switch (fun(visitor, current_element_->msg)) {
-        case match_case::skip:
-          skipped = true;
-          break;
-        default:
-          break;
-        case match_case::no_match: {
-          if (had_timeout)
-            has_timeout(true);
-          auto sres = default_handler_(this,
-                                       current_element_->msg.cvals().get());
-          if (sres.flag != rt_skip)
-            visitor.visit(sres);
-          else
+      if (! current_element_->mid.is_flow_controlled()) {
+        local_actor_invoke_result_visitor visitor{this};
+        switch (fun(visitor, current_element_->msg)) {
+          case match_case::skip:
             skipped = true;
+            break;
+          default:
+            break;
+          case match_case::no_match: {
+            if (had_timeout)
+              has_timeout(true);
+            auto sres = default_handler_(this,
+                                         current_element_->msg.cvals().get());
+            if (sres.flag != rt_skip)
+              visitor.visit(sres);
+            else
+              skipped = true;
+          }
+        }
+      } else {
+        if (! current_element_->sender) {
+          CAF_LOG_ERROR("received flow-controlled message from anonymous");
+        } else {
+          auto src = sources_.find(actor_cast<actor_addr>(current_element_->sender));
+          if (src == sources_.end()) {
+            CAF_LOG_ERROR("received flow-controlled message from unknown source");
+          } else {
+            local_actor_flow_visitor visitor{this, src};
+            switch (fun(visitor, current_element_->msg)) {
+              case match_case::skip:
+                skipped = true;
+                break;
+              default:
+                break;
+              case match_case::no_match: {
+                if (had_timeout)
+                  has_timeout(true);
+                auto sres = default_handler_(this,
+                                             current_element_->msg.cvals().get());
+                if (sres.flag != rt_skip)
+                  visitor.visit(sres);
+                else
+                  skipped = true;
+              }
+            }
+          }
         }
       }
       ptr.swap(current_element_);
@@ -1044,6 +1191,7 @@ bool local_actor::cleanup(error&& fail_state, execution_unit* host) {
     CAF_ASSERT(private_thread_ != nullptr);
     private_thread_->shutdown();
   }
+  generators_.clear();
   current_mailbox_element().reset();
   if (! mailbox_.closed()) {
     detail::sync_request_bouncer f{fail_state};
@@ -1067,6 +1215,76 @@ void local_actor::quit(error x) {
   is_terminated(true);
   if (is_blocking())
     throw actor_exited(fail_state_);
+}
+
+void local_actor::grant_credit(uint64_t newly_available,
+                               sources_map::iterator cause) {
+  CAF_LOG_TRACE(CAF_ARG(newly_available));
+  open_credit_ += newly_available;
+//printf("open_credit_: %d, in_flight: %d, low_watermark: %d, sources_: %s\n", (int) open_credit_, (int) in_flight(), (int) low_watermark(), deep_to_string(sources_).c_str());
+  bool above_low_watermark = in_flight() > low_watermark();
+  // assign new credit to cause if it ran out of credit
+  // but we wouldn't assign it new credit otherwise
+  if (cause != sources_.end()) {
+    cause->second -= newly_available;
+    if (cause->second == 0 && above_low_watermark) {
+      auto ptr = actor_cast<strong_actor_ptr>(cause->first);
+      if (ptr) {
+        cause->second = open_credit_;
+        ptr->enqueue(mailbox_element::make(ctrl(), message_id::make(),
+                                           {}, sys_atom::value,
+                                           get_atom::value, open_credit_),
+                      context());
+        open_credit_ = 0;
+      }
+      return;
+    }
+  }
+  if (above_low_watermark || sources_.empty())
+    return;
+  // convert weak pointers to strong ones
+  std::vector<actor> src_vec;
+  auto src_iter = sources_.begin();
+  auto src_end = sources_.end();
+  while (src_iter != src_end) {
+    auto ptr = actor_cast<strong_actor_ptr>(src_iter->first);
+    if (! ptr) {
+      open_credit_ += src_iter->second;
+      src_iter = sources_.erase(src_iter);
+    } else {
+      src_vec.emplace_back(actor_cast<actor>(std::move(ptr)));
+      ++src_iter;
+    }
+  }
+  // bail out if no source remains
+  if (sources_.empty())
+    return;
+  CAF_ASSERT(src_vec.size() == sources_.size());
+  // calculate how much new credit we can hand out per source
+  auto credit = open_credit_ / src_vec.size();
+  // make sure we advance at least *some* sources if we can't split
+  // available credit among all sources
+  while (credit == 0) {
+    src_vec.pop_back();
+    credit = open_credit_ / src_vec.size();
+  }
+  CAF_LOG_DEBUG("grant more credit to sources"
+                << CAF_ARG(credit) << CAF_ARG(src_vec));
+//printf("grant more credit to sources: %d %s\n", (int) credit, deep_to_string(src_vec).c_str());
+  // iterate both ranges, update open credit per source and send messages
+  src_iter = sources_.begin();
+  auto i = src_vec.begin();
+  while (i != src_vec.end()) {
+    CAF_ASSERT(src_iter->first == *i);
+    src_iter->second += credit;
+    (*i)->enqueue(mailbox_element::make(ctrl(), message_id::make(),
+                                        {}, sys_atom::value,
+                                        get_atom::value, credit),
+                  context());
+    ++src_iter;
+    ++i;
+  }
+  open_credit_ -= credit * src_vec.size();
 }
 
 } // namespace caf

@@ -34,6 +34,7 @@
 #include "caf/actor_factory.hpp"
 #include "caf/is_typed_actor.hpp"
 #include "caf/type_erased_value.hpp"
+#include "caf/named_actor_config.hpp"
 
 #include "caf/detail/safe_equal.hpp"
 #include "caf/detail/type_traits.hpp"
@@ -45,27 +46,32 @@ class actor_system_config {
 public:
   friend class actor_system;
 
+  template <class K, class V>
+  using hash_map = std::unordered_map<K, V>;
+
   using module_factory = std::function<actor_system::module* (actor_system&)>;
 
   using module_factories = std::vector<module_factory>;
 
   using value_factory = std::function<type_erased_value_ptr ()>;
 
-  using value_factories_by_name = std::unordered_map<std::string, value_factory>;
+  using value_factories_by_name = hash_map<std::string, value_factory>;
 
-  using value_factories_by_rtti = std::unordered_map<std::type_index, value_factory>;
+  using value_factories_by_rtti = hash_map<std::type_index, value_factory>;
 
-  using actor_factories = std::unordered_map<std::string, actor_factory>;
+  using actor_factories = hash_map<std::string, actor_factory>;
 
-  using portable_names = std::unordered_map<std::type_index, std::string>;
+  using portable_names = hash_map<std::type_index, std::string>;
 
   using error_renderer = std::function<std::string (uint8_t, atom_value, const message&)>;
 
-  using error_renderers = std::unordered_map<atom_value, error_renderer>;
+  using error_renderers = hash_map<atom_value, error_renderer>;
 
   using option_ptr = std::unique_ptr<config_option>;
 
   using options_vector = std::vector<option_ptr>;
+
+  using named_actor_config_map = hash_map<std::string, named_actor_config>;
 
   class opt_group {
   public:
@@ -208,6 +214,9 @@ public:
   // System parameters that are set while initializing modules.
   node_id network_id;
   proxy_registry* network_proxies;
+
+  // Config parameter for individual actor types.
+  named_actor_config_map named_actor_configs;
 
   int (*slave_mode_fun)(actor_system&, const actor_system_config&);
 

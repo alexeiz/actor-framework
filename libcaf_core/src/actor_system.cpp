@@ -259,6 +259,7 @@ actor_system::actor_system(actor_system_config&& cfg)
   types_.error_renderers_ = std::move(cfg.error_renderers_);
   // move remaining config
   node_.swap(cfg.network_id);
+  named_actor_configs_ = std::move(cfg.named_actor_configs);
   // spawn config and spawn servers (lazily to not access the scheduler yet)
   static constexpr auto Flags = hidden + lazy_init;
   spawn_serv_ = actor_cast<strong_actor_ptr>(spawn<Flags>(spawn_serv_impl));

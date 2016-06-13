@@ -47,6 +47,7 @@
 #include "caf/actor_config.hpp"
 #include "caf/actor_system.hpp"
 #include "caf/spawn_options.hpp"
+#include "caf/stream_handle.hpp"
 #include "caf/abstract_actor.hpp"
 #include "caf/abstract_group.hpp"
 #include "caf/execution_unit.hpp"
@@ -385,6 +386,32 @@ public:
 
   resume_result resume(execution_unit*, size_t) override;
 
+  // -- flow control messaging -------------------------------------------------
+
+  template <class F>
+  stream_handle new_stream(actor sink, F generator) {
+    if (generators_.count(sink) > 0) {
+      CAF_LOG_WARNING("multiple new_stream calls for the same sink");
+      return {};
+    }
+    auto f = [=]() -> bool {
+      auto x = generator();
+      static_assert(is_result<decltype(x)>::value,
+                    "Generator function must return a `result<Ts...>`");
+      if (x.value.empty())
+        return false;
+      auto mid = message_id::from_integer_value(message_id::flow_controlled_flag_mask);
+      sink->enqueue(mailbox_element::make(ctrl(), mid, {}, std::move(x.value)),
+                    context());
+      return true;
+    };
+    generators_.emplace(sink, std::make_pair(std::move(f), ctrl()));
+    sink->enqueue(mailbox_element::make(ctrl(), message_id::make(), {},
+                                        sys_atom::value, add_source_atom::value),
+                  context());
+    return {this, sink};
+  }
+
   // -- here be dragons: end of public interface -------------------------------
 
   /// @cond PRIVATE
@@ -544,6 +571,30 @@ public:
 
   void do_become(behavior bhvr, bool discard_old);
 
+  /// Returns the maximum credit per source.
+  uint64_t max_credit_per_source() const {
+    return max_credit_ / sources_.size();
+  }
+
+  /// Returns how many messages are currently assumbed to be in-flight.
+  uint64_t in_flight() const {
+    return max_credit_ - open_credit_;
+  }
+
+  /// Denotes at which point an actors grants more credit to its sources
+  /// in order to receive more work items.
+  uint64_t low_watermark() const {
+    return low_watermark_;
+  }
+
+  // Stores registered sources.
+  using sources_map = std::unordered_map<actor_addr, uint64_t>;
+
+  /// Allows sources to send more work item if low watermark is reached
+  /// or if `cause` ran out of credit.
+  virtual void grant_credit(uint64_t newly_available,
+                            sources_map::iterator cause);
+
 protected:
   // used by both event-based and blocking actors
   mailbox_type mailbox_;
@@ -587,6 +638,27 @@ protected:
 
   // used for setting custom exit message handlers
   exit_handler exit_handler_;
+
+  // Unassigned credit.
+  uint64_t open_credit_;
+
+  // Threshold for demanding more work.
+  uint64_t low_watermark_;
+
+  // Maximum number of allowed "pending" messages.
+  uint64_t max_credit_;
+
+  // Registered sources.
+  sources_map sources_;
+
+  using generator_function = std::function<bool ()>;
+
+  using generators_value = std::pair<generator_function, strong_actor_ptr>;
+
+  // Generator functions of open Streams, the second mapped value is
+  // a strong pointer to `this` in order to keep this actor alive as long
+  // as it has at least one open stream.
+  std::unordered_map<actor, generators_value> generators_;
 
   /// @endcond
 

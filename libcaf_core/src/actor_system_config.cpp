@@ -31,13 +31,21 @@ namespace caf {
 
 namespace {
 
+const char actor_conf_prefix[] = "actor:";
+constexpr size_t actor_conf_prefix_size = 6;
+
 using options_vector = actor_system_config::options_vector;
 
 class actor_system_config_reader {
 public:
   using sink = std::function<void (size_t, config_value&)>;
 
-  actor_system_config_reader(options_vector& xs, options_vector& ys) {
+  using named_actor_sink = std::function<void (size_t, const std::string&,
+                                               config_value&)>;
+
+  actor_system_config_reader(options_vector& xs, options_vector& ys,
+                             named_actor_sink na_sink)
+      : named_actor_sink_(std::move(na_sink)){
     add_opts(xs);
     add_opts(ys);
   }
@@ -49,15 +57,24 @@ public:
 
   void operator()(size_t ln, std::string name, config_value& cv) {
     auto i = sinks_.find(name);
-    if (i == sinks_.end())
-      std::cerr << "error in line " << ln
-                << ": unrecognized parameter name \"" << name << "\"";
-    else
+    if (i != sinks_.end()) {
       (i->second)(ln, cv);
+      return;
+    }
+    // check whether this is an individual actor config
+    if (name.compare(0, actor_conf_prefix_size, actor_conf_prefix) == 0) {
+      name.erase(0, actor_conf_prefix_size);
+      named_actor_sink_(ln, name, cv);
+      return;
+    }
+    std::cerr << "error in line " << ln
+              << ": unrecognized parameter name \"" << name << "\""
+              << std::endl;
   }
 
 private:
   std::map<std::string, sink> sinks_;
+  named_actor_sink named_actor_sink_;
 };
 
 } // namespace <anonymous>
@@ -177,7 +194,34 @@ actor_system_config& actor_system_config::parse(int argc, char** argv,
   if (! config_file_name.empty()) {
     std::ifstream ini{config_file_name};
     if (ini.good()) {
-      actor_system_config_reader consumer{options_, custom_options_};
+      using conf_sink = std::function<void (size_t, config_value&)>;
+      using conf_sinks = std::unordered_map<std::string, conf_sink>;
+      using conf_mapping = std::pair<options_vector, conf_sinks>;
+      hash_map<std::string, conf_mapping> ovs;
+      auto nac_sink = [&](size_t ln, const std::string& nm, config_value& cv) {
+        std::string actor_name{nm.begin(), std::find(nm.begin(), nm.end(), '.')};
+        auto ac = named_actor_configs.find(actor_name);
+        if (ac == named_actor_configs.end())
+          ac = named_actor_configs.emplace(actor_name,
+                                           named_actor_config{}).first;
+        auto& ov = ovs[actor_name];
+        if (ov.first.empty()) {
+          opt_group(ov.first, ac->first.c_str())
+          .add(ac->second.strategy, "strategy", "")
+          .add(ac->second.low_watermark, "low-watermark", "")
+          .add(ac->second.max_pending, "max-pending", "");
+          for (auto& opt : ov.first)
+            ov.second.emplace(opt->full_name(), opt->to_sink());
+        }
+        auto i = ov.second.find(nm);
+        if (i != ov.second.end())
+          i->second(ln, cv);
+        else
+          std::cerr << "error in line " << ln
+                    << ": unrecognized parameter name \"" << nm << "\""
+                    << std::endl;
+      };
+      actor_system_config_reader consumer{options_, custom_options_, nac_sink};
       detail::parse_ini(ini, consumer, std::cerr);
     }
   }
