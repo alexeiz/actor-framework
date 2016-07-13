@@ -66,8 +66,13 @@ public:
 
   int descriptor() const;
 
+  inline bool await_flare() const {
+    return await_flare_;
+  }
+
 private:
   flare flare_;
+  bool await_flare_;
 };
 
 } // namespace detail

@@ -41,11 +41,14 @@ using chrono::seconds;
 
 namespace {
 
-bool is_ready(detail::flare_actor* a, seconds secs = seconds::zero()) {
+bool is_ready(detail::flare_actor* a, long secs = 1) {
+  if (!a->await_flare())
+    return true;
   pollfd p = {a->descriptor(), POLLIN, {}};
-  auto n = ::poll(&p, 1, secs.count() * 1000);
+  auto n = ::poll(&p, 1, seconds(secs).count() * 1000);
   if (n < 0)
     terminate();
+printf("%s %d -- %d\n", __FILE__, __LINE__, (int) n);
   return n == 1 && p.revents & POLLIN;
 }
 
@@ -65,11 +68,11 @@ CAF_TEST(direct) {
   auto a = sys.spawn<detail::flare_actor>();
   auto f = actor_cast<detail::flare_actor*>(a);
   CAF_MESSAGE("one message");
-  CAF_CHECK(!is_ready(f));
+  CAF_CHECK(!is_ready(f, 0));
   self->send(a, 42);
   CAF_CHECK(is_ready(f));
   f->receive([&](int i) { CAF_CHECK_EQUAL(i, 42); });
-  CAF_CHECK(!is_ready(f));
+  CAF_CHECK(!is_ready(f, 0));
   CAF_MESSAGE("three messages");
   self->send(a, 42);
   self->send(a, 43);
@@ -80,7 +83,7 @@ CAF_TEST(direct) {
   f->receive([&](int i) { CAF_CHECK_EQUAL(i, 43); });
   CAF_CHECK(is_ready(f));
   f->receive([&](int i) { CAF_CHECK_EQUAL(i, 44); });
-  CAF_CHECK(!is_ready(f));
+  CAF_CHECK(!is_ready(f, 0));
 }
 
 CAF_TEST(indirect) {
@@ -94,18 +97,18 @@ CAF_TEST(indirect) {
   auto f = actor_cast<detail::flare_actor*>(a);
   CAF_MESSAGE("one message");
   self->send(d, 42);
-  CAF_CHECK(is_ready(f, seconds{1}));
+  CAF_CHECK(is_ready(f, 1));
   f->receive([&](int i) { CAF_CHECK_EQUAL(i, 42); });
-  CAF_CHECK(!is_ready(f));
+  CAF_CHECK(!is_ready(f, 0));
   CAF_MESSAGE("three messages");
   self->send(d, 42);
   self->send(d, 43);
   self->send(d, 44);
-  CAF_CHECK(is_ready(f, seconds{1}));
+  CAF_CHECK(is_ready(f, 1));
   f->receive([&](int i) { CAF_CHECK_EQUAL(i, 42); });
   CAF_CHECK(is_ready(f));
   f->receive([&](int i) { CAF_CHECK_EQUAL(i, 43); });
   CAF_CHECK(is_ready(f));
   f->receive([&](int i) { CAF_CHECK_EQUAL(i, 44); });
-  CAF_CHECK(!is_ready(f));
+  CAF_CHECK(!is_ready(f, 0));
 }

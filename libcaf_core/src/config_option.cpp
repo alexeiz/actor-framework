@@ -58,24 +58,22 @@ std::string config_option::full_name() const {
 const char* config_option::type_name_visitor::operator()(const std::string&) const {
   return "a string";
 }
+
 const char* config_option::type_name_visitor::operator()(double) const {
   return "a double";
 }
-const char* config_option::type_name_visitor::operator()(int64_t) const {
-  return "an integer";
-}
-const char* config_option::type_name_visitor::operator()(size_t) const {
-  return "an unsigned integer";
-}
-const char* config_option::type_name_visitor::operator()(uint16_t) const {
-  return "an unsigned short integer";
-}
+
 const char* config_option::type_name_visitor::operator()(bool) const {
   return "a boolean";
 }
+
 const char* config_option::type_name_visitor::operator()(atom_value) const {
   return "an atom";
 }
+
+const char* config_option::type_name_visitor::signed_integer = "a signed integer";
+
+const char* config_option::type_name_visitor::unsigned_integer = "an unsigned integer";
 
 bool config_option::assign_config_value(size_t& x, int64_t& y) {
   if (y < 0 || !unsigned_assign_in_range(x, y))

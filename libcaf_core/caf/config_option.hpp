@@ -76,11 +76,33 @@ public:
   struct type_name_visitor : static_visitor<const char*> {
     const char* operator()(const std::string&) const;
     const char* operator()(double) const;
-    const char* operator()(int64_t) const;
-    const char* operator()(size_t) const;
-    const char* operator()(uint16_t) const;
     const char* operator()(bool) const;
     const char* operator()(atom_value) const;
+
+    template <class T>
+    typename std::enable_if<
+      std::is_integral<T>::value
+      && std::is_signed<T>::value
+      && !std::is_same<T, bool>::value,
+      const char*
+    >::type
+    operator()(T) const {
+      return signed_integer;
+    }
+
+    template <class T>
+    typename std::enable_if<
+      std::is_integral<T>::value
+      && !std::is_signed<T>::value
+      && !std::is_same<T, bool>::value,
+      const char*
+    >::type
+    operator()(T) const {
+      return unsigned_integer;
+    }
+
+    static const char* signed_integer;
+    static const char* unsigned_integer;
   };
 
 protected:

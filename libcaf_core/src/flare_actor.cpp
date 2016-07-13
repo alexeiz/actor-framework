@@ -27,7 +27,9 @@
 namespace caf {
 namespace detail {
 
-flare_actor::flare_actor(actor_config& sys) : blocking_actor{sys} {
+flare_actor::flare_actor(actor_config& sys)
+    : blocking_actor{sys},
+      await_flare_(true) {
   // Ensure that the first enqueue operation returns unblocked_reader.
   mailbox().try_block();
 }
@@ -44,7 +46,7 @@ void flare_actor::act() {
 
 void flare_actor::await_data() {
   CAF_LOG_DEBUG("awaiting data");
-  if (has_next_message())
+  if (! await_flare_)
     return;
   pollfd p = {flare_.fd(), POLLIN, {}};
   for (;;) {
@@ -55,26 +57,32 @@ void flare_actor::await_data() {
     if (n == 1) {
       CAF_ASSERT(p.revents & POLLIN);
       CAF_ASSERT(has_next_message());
-      break;
+      if (flare_.extinguish_one()) {
+        await_flare_ = false;
+        return;
+      }
     }
   }
 }
 
 bool flare_actor::await_data(timeout_type timeout) {
   CAF_LOG_DEBUG("awaiting data with timeout");
-  if (has_next_message())
+  if (! await_flare_)
     return true;
-  pollfd p = {flare_.fd(), POLLIN, {}};
   auto delta = timeout - timeout_type::clock::now();
   if (delta.count() <= 0)
     return false;
+  pollfd p = {flare_.fd(), POLLIN, {}};
   auto n = ::poll(&p, 1, delta.count());
   if (n < 0 && errno != EAGAIN)
     std::terminate();
   if (n == 1) {
     CAF_ASSERT(p.revents & POLLIN);
     CAF_ASSERT(has_next_message());
-    return true;
+    if (flare_.extinguish_one()) {
+      await_flare_ = false;
+      return true;
+    }
   }
   return false;
 }
@@ -101,11 +109,8 @@ void flare_actor::enqueue(mailbox_element_ptr ptr, execution_unit*) {
 
 mailbox_element_ptr flare_actor::dequeue() {
   auto msg = next_message();
-  if (!has_next_message() && mailbox().try_block()) {
-    CAF_LOG_DEBUG("extinguishing flare");
-    auto extinguished = flare_.extinguish_one();
-    CAF_ASSERT(extinguished);
-  }
+  if (!has_next_message() && mailbox().try_block())
+    await_flare_ = true;
   return msg;
 }
 
