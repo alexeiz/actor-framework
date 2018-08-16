@@ -668,6 +668,40 @@ if(DOXYGEN_FOUND)
 endif(DOXYGEN_FOUND)
 
 ################################################################################
+#                                CMake Package                                 #
+################################################################################
+
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/cafConfigVersion.cmake"
+  VERSION ${CAF_VERSION}
+  COMPATIBILITY AnyNewerVersion)
+
+export(
+  EXPORT cafTargets
+  FILE "${CMAKE_CURRENT_BINARY_DIR}/cafTargets.cmake"
+  NAMESPACE caf::)
+
+set(ConfigPackageLocation lib/cmake/caf)
+
+configure_package_config_file(
+  cmake/cafConfig.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/cafConfig.cmake"
+  INSTALL_DESTINATION ${ConfigPackageLocation})
+
+install(
+  EXPORT cafTargets
+  FILE cafTargets.cmake
+  NAMESPACE caf::
+  DESTINATION ${ConfigPackageLocation})
+
+install(
+  FILES "${CMAKE_CURRENT_BINARY_DIR}/cafConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/cafConfigVersion.cmake"
+  DESTINATION ${ConfigPackageLocation}
+  COMPONENT Devel)
+
+################################################################################
 #                                Manual setup                                  #
 ################################################################################
 

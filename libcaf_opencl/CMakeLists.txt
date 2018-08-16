@@ -28,7 +28,7 @@ if(NOT CAF_BUILD_STATIC_ONLY)
                         VERSION "${CAF_VERSION}"
                         OUTPUT_NAME caf_opencl)
   if(NOT WIN32)
-    install(TARGETS libcaf_opencl_shared LIBRARY DESTINATION lib)
+    install(TARGETS libcaf_opencl_shared EXPORT cafTargets LIBRARY DESTINATION lib INCLUDES DESTINATION include)
   endif()
 endif()
 # build static library only if --build-static or --build-static-only was set
@@ -40,7 +40,7 @@ if(CAF_BUILD_STATIC_ONLY OR CAF_BUILD_STATIC)
                                              ${CAF_LIBRARY_CORE_STATIC}
                                              ${OpenCL_LIBRARIES})
   set_target_properties(libcaf_opencl_static PROPERTIES OUTPUT_NAME caf_opencl_static)
-  install(TARGETS libcaf_opencl_static ARCHIVE DESTINATION lib)
+  install(TARGETS libcaf_opencl_static EXPORT cafTargets ARCHIVE DESTINATION lib INCLUDES DESTINATION include)
 endif()
 link_directories(${LD_DIRS})
 include_directories(. ${INCLUDE_DIRS})
